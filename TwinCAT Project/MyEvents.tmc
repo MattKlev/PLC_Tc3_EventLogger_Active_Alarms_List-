@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<TcModuleClass>
+	<DataTypes>
+		<DataType>
+			<Name GUID="{F442ABED-B9E8-43C1-B74E-A7B33D5274DD}">StationEvents</Name>
+			<DisplayName TxtId=""><![CDATA[Station events]]></DisplayName>
+			<EventId>
+				<Name Id="2">CycleComplete</Name>
+				<DisplayName TxtId=""><![CDATA[Cycle complete]]></DisplayName>
+				<Severity>Info</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="3">MaintenanceDue</Name>
+				<DisplayName TxtId=""><![CDATA[Maintenance due]]></DisplayName>
+				<Severity>Warning</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="4">PartJam</Name>
+				<DisplayName TxtId=""><![CDATA[Part jam]]></DisplayName>
+				<Severity>Error</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="5">Overtemperature</Name>
+				<DisplayName TxtId=""><![CDATA[Overtemperature]]></DisplayName>
+				<Severity>Critical</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="6">LowMaterial</Name>
+				<DisplayName TxtId=""><![CDATA[Low material]]></DisplayName>
+				<Severity>Warning</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="7">DoorOpen</Name>
+				<DisplayName TxtId=""><![CDATA[Door open]]></DisplayName>
+				<Severity>Warning</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="8">MotorFault</Name>
+				<DisplayName TxtId=""><![CDATA[Motor fault]]></DisplayName>
+				<Severity>Error</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="9">SensorFault</Name>
+				<DisplayName TxtId=""><![CDATA[Sensor fault]]></DisplayName>
+				<Severity>Error</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="10">EmergencyStop</Name>
+				<DisplayName TxtId=""><![CDATA[Emergency stop]]></DisplayName>
+				<Severity>Critical</Severity>
+			</EventId>
+			<Hides>
+				<Hide GUID="{B759EADA-4ECC-4965-85A1-F6E7E3C7A4CD}"/>
+				<Hide GUID="{4C97BB1A-404A-496D-BDAA-E5B9FD30A9E5}"/>
+				<Hide GUID="{6256CEB5-08A3-4150-86B6-62B5EEE2FB3B}"/>
+				<Hide GUID="{F04950FD-4562-40CB-9CD9-74F0C50FD659}"/>
+				<Hide GUID="{E4616175-A4A4-472C-ABA3-7D21944FA76C}"/>
+			</Hides>
+		</DataType>
+		<DataType>
+			<Name GUID="{012B46D4-6D01-4D17-87FF-3B0E59B675CF}">MachineEvents</Name>
+			<DisplayName TxtId=""><![CDATA[Machine events (NOT subscribed by the station listener)]]></DisplayName>
+			<EventId>
+				<Name Id="1">MachineMessage</Name>
+				<DisplayName TxtId=""><![CDATA[Machine message]]></DisplayName>
+				<Severity>Info</Severity>
+			</EventId>
+			<EventId>
+				<Name Id="2">MachineAlarm</Name>
+				<DisplayName TxtId=""><![CDATA[Machine alarm]]></DisplayName>
+				<Severity>Error</Severity>
+			</EventId>
+		</DataType>
+	</DataTypes>
+</TcModuleClass>

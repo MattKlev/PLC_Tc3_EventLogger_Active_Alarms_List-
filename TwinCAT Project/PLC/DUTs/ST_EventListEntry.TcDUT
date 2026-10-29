@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="ST_EventListEntry" Id="{f45e6840-84fd-4bb3-a58a-d5d6274f9e99}">
+    <Declaration><![CDATA[// One row of FB_ActiveAlarmListener (active alarm table and message ring buffer).
+// Application independent: everything FB_TcEvent exposes, copied out of the callback.
+TYPE ST_EventListEntry :
+STRUCT
+    bUsed       : BOOL;             // row in use = alarm is ACTIVE (raised, or cleared but waiting for confirmation)
+    bIsAlarm    : BOOL;             // TRUE = alarm, FALSE = message
+    bRaised     : BOOL;             // alarm state: TRUE = Raised, FALSE = cleared (row only kept while waiting for confirmation)
+    eConfirmationState : TcEventConfirmationState;  // NotSupported / NotRequired / WaitForConfirmation / Confirmed / Reset
+    nSequence   : UDINT;            // running number (messages only)
+    eventClass  : GUID;             // event class
+    nEventId    : UDINT;            // event id within the class
+    eSeverity   : TcEventSeverity;  // Verbose..Critical
+    nTimestamp  : ULINT;            // raise / send time stamped by the EventLogger, 100 ns since 1601-01-01 UTC
+    nReceived   : ULINT;            // F_GetSystemTime when the listener callback ran (same clock, same unit)
+    tLatency    : LTIME;            // nReceived - nTimestamp: raise -> visible in this table
+    nSourceId   : UDINT;            // I_TcSourceInfo.nId   (application defined, e.g. station number)
+    guidSource  : GUID;             // I_TcSourceInfo.guid
+    sSourceName : STRING(255);      // I_TcSourceInfo.sName
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

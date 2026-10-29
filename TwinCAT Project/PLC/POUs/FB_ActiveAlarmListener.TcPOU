@@ -1,0 +1,606 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_ActiveAlarmListener" Id="{fb7f8cb1-a96c-42bc-a458-1aeb638be8e8}" SpecialFunc="None">
+    <Declaration><![CDATA[// Generic, application-independent "active alarm list" for the PLC.
+// A PLC-side replacement for what FB_ReadTc3Events does for the visu event table,
+// but without the visualization dependency and with structured data instead of text.
+//
+// Dependencies: Tc3_EventLogger, Tc2_System (MEMCMP), ST_EventListEntry, I_ActiveAlarmList.
+//
+// The APPLICATION owns the storage and passes it in as variable-length arrays (ARRAY[*]),
+// so the table sizes are decided where the FB is used - no parameter list / GVL needed:
+//   aActiveAlarms[]   - every alarm that is ACTIVE: raised, or cleared but still waiting for
+//                       confirmation (same meaning as FB_TcAlarm.bActive). Added in OnAlarmRaised,
+//                       removed when the alarm is neither raised nor waiting for confirmation
+//                       (OnAlarmCleared / OnAlarmConfirmed / OnAlarmDisposed).
+//   aRecentMessages[] - ring buffer of the last N messages, each tagged with a running nSequence
+//
+// Usage:
+//   VAR
+//       fbList          : FB_ActiveAlarmListener;
+//       aActiveAlarms   : ARRAY[1..128] OF ST_EventListEntry;   // any size, any bounds
+//       aRecentMessages : ARRAY[1..32]  OF ST_EventListEntry;
+//   END_VAR
+//   fbFilter.Clear().EventClass.EqualTo(<class>.uuidEventClass);        // or any other filter
+//   fbList.Subscribe2(fbFilter);                                         // once; Subscribe() = everything
+//   fbList(aActiveAlarms := aActiveAlarms, aRecentMessages := aRecentMessages);   // EVERY cycle
+//   fbConsumer(ipAlarmList := fbList, ...);                              // consumers take I_ActiveAlarmList
+//
+// Notes:
+//   - call the FB body every cycle: it binds the arrays and processes the event queue (callbacks below)
+//   - only events raised AFTER Subscribe are seen (no history replay by the EventLogger)
+//   - alarm identity = event class + event id + source id (what the EventLogger keys an alarm instance on)
+//   - the fbEvent REFERENCE handed to the callbacks must not be stored, so fields are copied out
+//   - I_ActiveAlarmList indexes rows 1..nMaxAlarms regardless of the array's declared bounds
+FUNCTION_BLOCK FB_ActiveAlarmListener EXTENDS FB_ListenerBase2 IMPLEMENTS I_ActiveAlarmList
+VAR_IN_OUT
+    aActiveAlarms   : ARRAY[*] OF ST_EventListEntry;   // raised alarms (one row per alarm instance)
+    aRecentMessages : ARRAY[*] OF ST_EventListEntry;   // message ring buffer
+END_VAR
+VAR_OUTPUT
+    bTableOverflow  : BOOL;                            // an alarm could not be stored (latched, see Reset)
+    hrLastError     : HRESULT;
+    // Determinism check: the callbacks run inside this FB's body, in the PLC task. Latency from the
+    // EventLogger's raise/send timestamp to the row being written is therefore bounded by the task
+    // cycle (plus the publisher/listener call order within the cycle). Reset() clears tMaxLatency.
+    tLastLatency    : LTIME;                           // of the most recent event (alarm or message)
+    tMaxLatency     : LTIME;                           // worst case seen since start / Reset
+    // callback counters (diagnostics)
+    nRaisedCallbacks, nClearedCallbacks, nConfirmedCallbacks, nDisposedCallbacks, nMessageCallbacks : UDINT;
+END_VAR
+VAR
+    // backing fields of the I_ActiveAlarmList properties
+    _nActiveAlarms       : UDINT;   // rows in use in aActiveAlarms
+    _nAlarmChangeCounter : UDINT;   // ++ on every raise / clear / dispose
+    _nMessageSequence    : UDINT;   // ++ per received message
+    stEmpty              : ST_EventListEntry;   // all zero, used to clear rows
+    // IID of ITcAlarm (TcCOM interface behind every alarm event): lets the listener ask the
+    // EventLogger for the alarm's raised / confirmation state inside the callback.
+    // (plain VAR, not CONSTANT: TcQueryInterface takes the IID by reference)
+    iidITcAlarm : IID := (Data1 := 16#EC6D4FF7, Data2 := 16#5805, Data3 := 16#4DDB,
+                          Data4 := [16#A3, 16#16, 16#27, 16#89, 16#4E, 16#77, 16#D6, 16#44]);
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Binds the arrays (VAR_IN_OUT) and processes the EventLogger queue -> On... callbacks below.
+hrLastError := SUPER^.Execute();
+]]></ST>
+    </Implementation>
+    <Method Name="Reset" Id="{8e1d2c3b-4a59-4f67-8d01-2e3f4a5b6c7d}">
+      <Declaration><![CDATA[// Clears the active alarm table, the message ring buffer and the overflow flag.
+// (Comparable to bClearTable of FB_ReadTc3Events.) Alarms raised later are picked up again.
+METHOD Reset
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+    aActiveAlarms[i] := stEmpty;
+END_FOR
+FOR i := LOWER_BOUND(aRecentMessages, 1) TO UPPER_BOUND(aRecentMessages, 1) DO
+    aRecentMessages[i] := stEmpty;
+END_FOR
+_nActiveAlarms  := 0;
+bTableOverflow := FALSE;
+tMaxLatency    := LTIME#0NS;
+_nAlarmChangeCounter := _nAlarmChangeCounter + 1;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Count" Id="{9f2e3d4c-5b6a-4078-9e12-3f4a5b6c7d8e}">
+      <Declaration><![CDATA[// Number of raised alarms (any source) whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD Count : UDINT
+VAR_INPUT
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Count := 0;
+FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+    IF aActiveAlarms[i].bUsed
+       AND aActiveAlarms[i].eSeverity >= eMinSeverity
+       AND aActiveAlarms[i].eSeverity <= eMaxSeverity THEN
+        Count := Count + 1;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CountBySource" Id="{a03f4e5d-6c7b-4189-af23-4a5b6c7d8e9f}">
+      <Declaration><![CDATA[// Number of raised alarms from source nSourceId (= FB_TcSourceInfo.nId the publisher used)
+// whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD CountBySource : UDINT
+VAR_INPUT
+    nSourceId    : UDINT;
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CountBySource := 0;
+FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+    IF aActiveAlarms[i].bUsed
+       AND aActiveAlarms[i].nSourceId = nSourceId
+       AND aActiveAlarms[i].eSeverity >= eMinSeverity
+       AND aActiveAlarms[i].eSeverity <= eMaxSeverity THEN
+        CountBySource := CountBySource + 1;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CountByEventClass" Id="{b14a5f6e-7d8c-429a-b034-5b6c7d8e9fa0}">
+      <Declaration><![CDATA[// Number of raised alarms of one event class whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD CountByEventClass : UDINT
+VAR_INPUT
+    eventClass   : GUID;
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CountByEventClass := 0;
+FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+    IF aActiveAlarms[i].bUsed
+       AND aActiveAlarms[i].eSeverity >= eMinSeverity
+       AND aActiveAlarms[i].eSeverity <= eMaxSeverity
+       AND MEMCMP(ADR(aActiveAlarms[i].eventClass), ADR(eventClass), SIZEOF(GUID)) = 0 THEN
+        CountByEventClass := CountByEventClass + 1;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsActive" Id="{c25b6a7f-8e9d-43ab-a145-6c7d8e9fa0b1}">
+      <Declaration><![CDATA[// TRUE if the alarm (event class + event id + source id) is currently raised.
+METHOD IsActive : BOOL
+VAR_INPUT
+    eventClass : GUID;
+    nEventId   : UDINT;
+    nSourceId  : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IsActive := FindAlarm(eventClass, nEventId, nSourceId) >= LOWER_BOUND(aActiveAlarms, 1);
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetAlarm" Id="{f0c59009-a74d-45e5-8174-b8e9f47beb97}">
+      <Declaration><![CDATA[// Copies row nIndex (1..nMaxAlarms) of the active alarm table. FALSE if the row is empty
+// or nIndex is out of range. (1-based regardless of the array's declared bounds.)
+METHOD GetAlarm : BOOL
+VAR_INPUT
+    nIndex : UDINT;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetAlarm := FALSE;
+IF nIndex >= 1 AND nIndex <= nMaxAlarms THEN
+    i := LOWER_BOUND(aActiveAlarms, 1) + UDINT_TO_DINT(nIndex) - 1;
+    IF aActiveAlarms[i].bUsed THEN
+        stEntry  := aActiveAlarms[i];
+        GetAlarm := TRUE;
+    END_IF
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetMessage" Id="{d36c7b80-9fae-44bc-b256-7d8e9fa0b1c2}">
+      <Declaration><![CDATA[// Fetches the message with running number nSequence from the ring buffer.
+// Returns FALSE if that message was never received or has already been overwritten.
+// Typical use: remember nMessageSequence, then loop over the newer ones each cycle.
+METHOD GetMessage : BOOL
+VAR_INPUT
+    nSequence : UDINT;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetMessage := FALSE;
+IF nSequence = 0 OR nSequence > _nMessageSequence THEN
+    RETURN;
+END_IF
+i := RingIndex(nSequence);
+IF aRecentMessages[i].bUsed AND aRecentMessages[i].nSequence = nSequence THEN
+    stEntry    := aRecentMessages[i];
+    GetMessage := TRUE;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="nActiveAlarms" Id="{6dfaf02f-ff73-42ff-859a-56a3f82a8999}">
+      <Declaration><![CDATA[// Number of alarms currently raised (rows in use).
+PROPERTY nActiveAlarms : UDINT]]></Declaration>
+      <Get Name="Get" Id="{d8bbd11a-8f69-4a1e-a2ec-a859c141a738}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nActiveAlarms := _nActiveAlarms;
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="nMaxAlarms" Id="{1f0d2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b}">
+      <Declaration><![CDATA[// Highest valid row index for GetAlarm (= number of elements in aActiveAlarms).
+PROPERTY nMaxAlarms : UDINT]]></Declaration>
+      <Get Name="Get" Id="{2a1e3b4c-5d6e-4f70-9b0c-1d2e3f4a5b6c}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nMaxAlarms := DINT_TO_UDINT(UPPER_BOUND(aActiveAlarms, 1) - LOWER_BOUND(aActiveAlarms, 1) + 1);
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="nAlarmChangeCounter" Id="{3b2f4c5d-6e7f-4081-8c1d-2e3f4a5b6c7d}">
+      <Declaration><![CDATA[// Increments on every raise / clear / dispose.
+PROPERTY nAlarmChangeCounter : UDINT]]></Declaration>
+      <Get Name="Get" Id="{4c305d6e-7f80-4192-9d2e-3f4a5b6c7d8e}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nAlarmChangeCounter := _nAlarmChangeCounter;
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="nMessageSequence" Id="{5d416e7f-8091-42a3-8e3f-4a5b6c7d8e9f}">
+      <Declaration><![CDATA[// Running number of the newest message received (0 = none yet).
+PROPERTY nMessageSequence : UDINT]]></Declaration>
+      <Get Name="Get" Id="{6e527f80-91a2-43b4-9f4a-5b6c7d8e9fa0}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nMessageSequence := _nMessageSequence;
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="nMaxRecentMessages" Id="{7f638091-a2b3-44c5-8a5b-6c7d8e9fa0b1}">
+      <Declaration><![CDATA[// Ring buffer size (= number of elements in aRecentMessages).
+PROPERTY nMaxRecentMessages : UDINT]]></Declaration>
+      <Get Name="Get" Id="{809491a2-b3c4-45d6-9b6c-7d8e9fa0b1c2}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nMaxRecentMessages := DINT_TO_UDINT(UPPER_BOUND(aRecentMessages, 1) - LOWER_BOUND(aRecentMessages, 1) + 1);
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="RingIndex" Id="{9a05b2c3-d4e5-46f7-8c7d-8e9fa0b1c2d3}">
+      <Declaration><![CDATA[// Array index in aRecentMessages for message sequence nSequence (>= 1).
+METHOD PRIVATE RingIndex : DINT
+VAR_INPUT
+    nSequence : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[RingIndex := LOWER_BOUND(aRecentMessages, 1) + UDINT_TO_DINT((nSequence - 1) MOD nMaxRecentMessages);
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyEvent" Id="{e47d8c91-a0bf-45cd-8367-8e9fa0b1c2d3}">
+      <Declaration><![CDATA[// Copies the fields of an incoming event into a table row and stamps the arrival time.
+METHOD PRIVATE CopyEvent
+VAR_INPUT
+    fbEvent  : REFERENCE TO FB_TcEvent;
+    bIsAlarm : BOOL;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+VAR
+    nNow : ULINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stEntry.bUsed      := TRUE;
+stEntry.bIsAlarm   := bIsAlarm;
+stEntry.eventClass := fbEvent.EventClass;
+stEntry.nEventId   := fbEvent.nEventId;
+stEntry.eSeverity  := fbEvent.eSeverity;
+stEntry.nTimestamp := fbEvent.nTimestamp;
+
+// raise -> here. Both stamps are Windows FILETIME (100 ns) from the same system clock.
+nNow := F_GetSystemTime();
+stEntry.nReceived := nNow;
+IF nNow >= fbEvent.nTimestamp THEN
+    stEntry.tLatency := ULINT_TO_LTIME((nNow - fbEvent.nTimestamp) * 100);
+ELSE
+    stEntry.tLatency := LTIME#0NS;
+END_IF
+tLastLatency := stEntry.tLatency;
+IF stEntry.tLatency > tMaxLatency THEN
+    tMaxLatency := stEntry.tLatency;
+END_IF
+IF fbEvent.ipSourceInfo <> 0 THEN
+    stEntry.nSourceId   := fbEvent.ipSourceInfo.nId;
+    stEntry.guidSource  := fbEvent.ipSourceInfo.guid;
+    stEntry.sSourceName := fbEvent.ipSourceInfo.sName;
+ELSE
+    stEntry.nSourceId   := 0;
+    stEntry.guidSource  := stEmpty.guidSource;
+    stEntry.sSourceName := '';
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FindAlarm" Id="{b14d9899-5c16-48c6-a182-a44642fa0cc7}">
+      <Declaration><![CDATA[// Array index of the alarm (class + id + source); LOWER_BOUND - 1 if not present.
+METHOD PRIVATE FindAlarm : DINT
+VAR_INPUT
+    eventClass : GUID;
+    nEventId   : UDINT;
+    nSourceId  : UDINT;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FindAlarm := LOWER_BOUND(aActiveAlarms, 1) - 1;
+FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+    IF aActiveAlarms[i].bUsed
+       AND aActiveAlarms[i].nEventId  = nEventId
+       AND aActiveAlarms[i].nSourceId = nSourceId
+       AND MEMCMP(ADR(aActiveAlarms[i].eventClass), ADR(eventClass), SIZEOF(GUID)) = 0 THEN
+        FindAlarm := i;
+        RETURN;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FindAlarmByEvent" Id="{f58e9da2-b1c0-46de-9478-9fa0b1c2d3e4}">
+      <Declaration><![CDATA[// FindAlarm for an incoming event.
+METHOD PRIVATE FindAlarmByEvent : DINT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+VAR
+    nSourceId : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF fbEvent.ipSourceInfo <> 0 THEN
+    nSourceId := fbEvent.ipSourceInfo.nId;
+END_IF
+FindAlarmByEvent := FindAlarm(fbEvent.EventClass, fbEvent.nEventId, nSourceId);
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddAlarm" Id="{3f24dece-37ae-4aad-ba15-bc18824a5ae8}">
+      <Declaration><![CDATA[// Adds (or refreshes) a raised alarm in the table.
+METHOD PRIVATE AddAlarm
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+VAR
+    i, idx, nNone : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nNone := LOWER_BOUND(aActiveAlarms, 1) - 1;
+idx   := FindAlarmByEvent(fbEvent);
+
+IF idx = nNone THEN     // free slot
+    FOR i := LOWER_BOUND(aActiveAlarms, 1) TO UPPER_BOUND(aActiveAlarms, 1) DO
+        IF NOT aActiveAlarms[i].bUsed THEN
+            idx := i;
+            EXIT;
+        END_IF
+    END_FOR
+END_IF
+
+IF idx = nNone THEN
+    bTableOverflow := TRUE;
+    RETURN;
+END_IF
+
+IF NOT aActiveAlarms[idx].bUsed THEN
+    _nActiveAlarms := _nActiveAlarms + 1;
+END_IF
+CopyEvent(fbEvent, TRUE, aActiveAlarms[idx]);
+aActiveAlarms[idx].bRaised := TRUE;
+QueryAlarmState(fbEvent, aActiveAlarms[idx]);
+_nAlarmChangeCounter := _nAlarmChangeCounter + 1;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueryAlarmState" Id="{c1a2b3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d}">
+      <Declaration><![CDATA[// Asks the EventLogger for the alarm's current raised / confirmation state and stores it in the row.
+// Returns FALSE if the event does not offer ITcAlarm (should not happen for alarm callbacks);
+// the row then keeps bRaised as set by the caller and NotSupported as confirmation state.
+METHOD PRIVATE QueryAlarmState : BOOL
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+VAR
+    ipAlarm   : ITcAlarm;
+    bIsRaised : BOOL32;
+    eState    : TcEventConfirmationState;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[QueryAlarmState := FALSE;
+IF fbEvent.ipEvent = 0 THEN
+    RETURN;
+END_IF
+IF SUCCEEDED(fbEvent.ipEvent.TcQueryInterface(iidITcAlarm, ADR(ipAlarm))) AND ipAlarm <> 0 THEN
+    IF SUCCEEDED(ipAlarm.GetIsRaised(bIsRaised)) THEN
+        stEntry.bRaised := bIsRaised <> 0;
+    END_IF
+    IF SUCCEEDED(ipAlarm.GetConfirmationState(eState)) THEN
+        stEntry.eConfirmationState := eState;
+    END_IF
+    ipAlarm.TcRelease();
+    QueryAlarmState := TRUE;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="UpdateAlarm" Id="{d2b3c4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e}">
+      <Declaration><![CDATA[// Cleared / Confirmed callback: refresh the row's state and drop it once the alarm is
+// neither raised nor waiting for confirmation (= FB_TcAlarm.bActive went FALSE).
+METHOD PRIVATE UpdateAlarm
+VAR_INPUT
+    fbEvent    : REFERENCE TO FB_TcEvent;
+    bConfirmed : BOOL;     // TRUE from OnAlarmConfirmed, FALSE from OnAlarmCleared
+END_VAR
+VAR
+    idx : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[idx := FindAlarmByEvent(fbEvent);
+IF idx < LOWER_BOUND(aActiveAlarms, 1) THEN
+    RETURN;                                   // not in the table (raised before Subscribe, or already removed)
+END_IF
+
+// best guess from the callback alone, then overwritten by the EventLogger's own answer if available
+IF bConfirmed THEN
+    aActiveAlarms[idx].eConfirmationState := TcEventConfirmationState.Confirmed;
+ELSE
+    aActiveAlarms[idx].bRaised := FALSE;
+END_IF
+QueryAlarmState(fbEvent, aActiveAlarms[idx]);
+
+IF NOT aActiveAlarms[idx].bRaised
+   AND aActiveAlarms[idx].eConfirmationState <> TcEventConfirmationState.WaitForConfirmation THEN
+    RemoveAlarm(fbEvent);                     // inactive -> gone
+ELSE
+    _nAlarmChangeCounter := _nAlarmChangeCounter + 1;   // still active, state changed
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveAlarm" Id="{324a1a90-3800-41c5-8257-21031cbd3f50}">
+      <Declaration><![CDATA[// Removes an alarm from the table (no-op if not present).
+METHOD PRIVATE RemoveAlarm
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+VAR
+    idx : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[idx := FindAlarmByEvent(fbEvent);
+IF idx >= LOWER_BOUND(aActiveAlarms, 1) THEN
+    aActiveAlarms[idx] := stEmpty;
+    IF _nActiveAlarms > 0 THEN
+        _nActiveAlarms := _nActiveAlarms - 1;
+    END_IF
+    _nAlarmChangeCounter := _nAlarmChangeCounter + 1;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAlarmRaised" Id="{094db839-dbd4-4a63-be66-4523a3e3ce88}">
+      <Declaration><![CDATA[METHOD OnAlarmRaised : HRESULT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nRaisedCallbacks := nRaisedCallbacks + 1;
+AddAlarm(fbEvent);
+OnAlarmRaised := S_OK;   // <> S_OK would pause further callbacks this cycle
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAlarmCleared" Id="{4d340cb6-cb36-4d49-b9e0-cca1ca21a422}">
+      <Declaration><![CDATA[METHOD OnAlarmCleared : HRESULT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nClearedCallbacks := nClearedCallbacks + 1;
+UpdateAlarm(fbEvent, FALSE);
+OnAlarmCleared := S_OK;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAlarmDisposed" Id="{d92c85e2-f170-4d2b-971d-365a9feb3bec}">
+      <Declaration><![CDATA[// Alarm instance released (FB_TcAlarm.Release / publisher stopped) - treat like cleared.
+METHOD OnAlarmDisposed : HRESULT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nDisposedCallbacks := nDisposedCallbacks + 1;
+RemoveAlarm(fbEvent);
+OnAlarmDisposed := S_OK;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAlarmConfirmed" Id="{b927f256-2c13-4d32-a2da-6d109dd7a0a6}">
+      <Declaration><![CDATA[// Confirm() on an alarm that was already cleared ends it -> row removed.
+// Confirm() on a raised alarm only updates the confirmation state -> row stays.
+METHOD OnAlarmConfirmed : HRESULT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nConfirmedCallbacks := nConfirmedCallbacks + 1;
+UpdateAlarm(fbEvent, TRUE);
+OnAlarmConfirmed := S_OK;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnMessageSent" Id="{70a0b57f-88e7-4594-b6a0-6c6af977f3bf}">
+      <Declaration><![CDATA[// Messages are stateless: append to the ring buffer and bump the sequence.
+METHOD OnMessageSent : HRESULT
+VAR_INPUT
+    fbEvent : REFERENCE TO FB_TcEvent;
+END_VAR
+VAR
+    i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nMessageCallbacks := nMessageCallbacks + 1;
+_nMessageSequence := _nMessageSequence + 1;
+i := RingIndex(_nMessageSequence);
+CopyEvent(fbEvent, FALSE, aRecentMessages[i]);
+aRecentMessages[i].nSequence := _nMessageSequence;
+OnMessageSent := S_OK;
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

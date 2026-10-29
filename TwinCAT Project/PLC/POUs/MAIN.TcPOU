@@ -1,0 +1,119 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="MAIN" Id="{b14459f4-e29f-4e14-aaa0-c8fc86aa47ca}" SpecialFunc="None">
+    <Declaration><![CDATA[// Test harness: 12 stations publish events, ONE listener keeps the active alarm
+// list and drives 12 stack lights - all in the PLC, no HMI involved.
+//
+// How to play (online, in the declaration part of MAIN):
+//   1. set nTestStation (1..12) and nTestAlarm (1..8, see FB_Station header for the mapping)
+//   2. pulse bTestRaise / bTestClear / bTestSendMessage
+//   3. watch aActiveAlarms, aRecentMessages, aStackLights[n].bRed/bYellow/bGreen
+PROGRAM MAIN
+VAR
+    aStations    : ARRAY[1..GVL_Params.cStations] OF FB_Station;      // event publishers (app specific)
+    aStackLights : ARRAY[1..GVL_Params.cStations] OF FB_StackLight;   // decoder ring -> outputs (app specific)
+
+    // the generic "active alarm list" (one per PLC) + the storage it works on (sized here, by the application)
+    fbListener      : FB_ActiveAlarmListener;
+    aActiveAlarms   : ARRAY[1..128] OF ST_EventListEntry;   // raised alarms
+    aRecentMessages : ARRAY[1..32]  OF ST_EventListEntry;   // last 32 messages (ring buffer)
+    fbFilter        : FB_TcEventFilter;
+    bSubscribe   : BOOL := TRUE;
+    hrSubscribe  : HRESULT;
+
+    // --- test controls -------------------------------------------------------
+    nTestStation       : UDINT := 1;   // 1..12
+    nTestAlarm         : UDINT := 1;   // 1..8: 1,4,5 = Warning (yellow)  2,6,7 = Error (red)  3,8 = Critical (red)
+    bTestRaise         : BOOL;         // raise aAlarms[nTestAlarm] on station nTestStation
+    bTestClear         : BOOL;         // clear it again
+    bTestSendMessage   : BOOL;         // green pulse
+    bTestClearAll      : BOOL;         // clear every raised alarm on nTestStation
+    hrTest             : HRESULT;
+
+    // --- "noise" from another event class, to prove the filter ----------------
+    // TC_EVENTS.MachineEvents is NOT in the listener's filter, so these must never
+    // show up in fbListener even though they share source id 3 with station 3.
+    fbMachineSource    : FB_TcSourceInfo;
+    fbMachineMessage   : FB_TcMessage;
+    fbMachineAlarm     : FB_TcAlarm;
+    bMachineInit       : BOOL := TRUE;
+    bTestMachineMessage    : BOOL;
+    bTestMachineRaiseAlarm : BOOL;
+    bTestMachineClearAlarm : BOOL;
+    hrMachineTest      : HRESULT;
+
+    // --- alarm WITH confirmation required: stays in the list after Clear(FALSE) until Confirm(); Clear(TRUE) ends it ---
+    fbAckSource        : FB_TcSourceInfo;
+    fbAckAlarm         : FB_TcAlarm;            // StationEvents.MotorFault, bWithConfirmation := TRUE, source id 13
+    bAckInit           : BOOL := TRUE;
+    bTestAckRaise      : BOOL;
+    bTestAckConfirm    : BOOL;
+    bTestAckClear      : BOOL;                  // Clear(FALSE): confirmation still required
+    bTestAckClearReset : BOOL;                  // Clear(TRUE):  confirmation reset
+    hrAckTest          : HRESULT;
+
+    i : UDINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// 1) stations: give each its id and let it create its events (first cycle)
+FOR i := 1 TO GVL_Params.cStations DO
+    aStations[i].nStationId := i;
+    aStations[i]();
+END_FOR
+
+// 2) subscribe the listener once - only to our station event class
+IF bSubscribe THEN
+    bSubscribe := FALSE;
+    // TC_EVENTS.StationEvents is only a namespace; the class GUID is reachable through any of its
+    // events (all carry the same uuidEventClass), so this matches ALL events of StationEvents.
+    fbFilter.Clear().EventClass.EqualTo(TC_EVENTS.StationEvents.CycleComplete.uuidEventClass);
+    hrSubscribe := fbListener.Subscribe2(fbFilter);
+END_IF
+
+// 3) process the event queue -> active alarm list (the FB body binds the arrays and runs Execute)
+fbListener(aActiveAlarms := aActiveAlarms, aRecentMessages := aRecentMessages);
+
+// 4) stack lights - each one filters the shared list by its own source id.
+//    They see the listener only as I_ActiveAlarmList (fbListener is implicitly converted).
+FOR i := 1 TO GVL_Params.cStations DO
+    aStackLights[i](ipAlarmList := fbListener, nSourceId := i);
+END_FOR
+
+// 5) test controls
+IF nTestStation >= 1 AND nTestStation <= GVL_Params.cStations THEN
+    IF bTestSendMessage THEN bTestSendMessage := FALSE; hrTest := aStations[nTestStation].SendMessage();  END_IF
+    IF bTestRaise       THEN bTestRaise       := FALSE; hrTest := aStations[nTestStation].Raise(nTestAlarm); END_IF
+    IF bTestClear       THEN bTestClear       := FALSE; hrTest := aStations[nTestStation].Clear(nTestAlarm); END_IF
+    IF bTestClearAll    THEN bTestClearAll    := FALSE; aStations[nTestStation].ClearAll();                  END_IF
+END_IF
+
+// 6) unrelated event class (filter test)
+IF bMachineInit THEN
+    bMachineInit := FALSE;
+    fbMachineSource.Clear();
+    fbMachineSource.nId   := 3;                 // deliberately collides with station 3
+    fbMachineSource.sName := 'Machine';
+    hrMachineTest := fbMachineMessage.CreateEx(TC_EVENTS.MachineEvents.MachineMessage, fbMachineSource);
+    hrMachineTest := fbMachineAlarm.CreateEx(TC_EVENTS.MachineEvents.MachineAlarm, FALSE, fbMachineSource);
+END_IF
+IF bTestMachineMessage    THEN bTestMachineMessage    := FALSE; hrMachineTest := fbMachineMessage.Send(0);       END_IF
+IF bTestMachineRaiseAlarm THEN bTestMachineRaiseAlarm := FALSE; hrMachineTest := fbMachineAlarm.Raise(0);        END_IF
+IF bTestMachineClearAlarm THEN bTestMachineClearAlarm := FALSE; hrMachineTest := fbMachineAlarm.Clear(0, FALSE); END_IF
+
+// 7) alarm with confirmation required (source id 13, no stack light; watch aActiveAlarms)
+IF bAckInit THEN
+    bAckInit := FALSE;
+    fbAckSource.Clear();
+    fbAckSource.nId   := 13;
+    fbAckSource.sName := 'Ack test';
+    hrAckTest := fbAckAlarm.CreateEx(TC_EVENTS.StationEvents.MotorFault, TRUE, fbAckSource);
+END_IF
+IF bTestAckRaise      THEN bTestAckRaise      := FALSE; hrAckTest := fbAckAlarm.Raise(0);        END_IF
+IF bTestAckConfirm    THEN bTestAckConfirm    := FALSE; hrAckTest := fbAckAlarm.Confirm(0);      END_IF
+IF bTestAckClear      THEN bTestAckClear      := FALSE; hrAckTest := fbAckAlarm.Clear(0, FALSE); END_IF
+IF bTestAckClearReset THEN bTestAckClearReset := FALSE; hrAckTest := fbAckAlarm.Clear(0, TRUE);  END_IF
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_StackLight" Id="{2b3c4d5e-6f70-4a81-92b3-c4d5e6f70a1b}" SpecialFunc="None">
+    <Declaration><![CDATA[// APPLICATION SPECIFIC decoder ring: active alarm list -> one station's stack light.
+// All knowledge about "stations" lives here; FB_ActiveAlarmListener knows nothing about them.
+//   RED    flashes while any Error/Critical alarm from this source is raised
+//   YELLOW flashes while any Warning (or lower) alarm from this source is raised
+//   GREEN  flashes for 3 s after a message from this source
+// The three colors are independent (a stack light can show more than one).
+//
+// Depends only on I_ActiveAlarmList, not on FB_ActiveAlarmListener: any list producer
+// that implements the interface can drive it.
+FUNCTION_BLOCK FB_StackLight
+VAR_INPUT
+    ipAlarmList   : I_ActiveAlarmList;      // the shared list (assign once; 0 = outputs stay off)
+    nSourceId     : UDINT;                  // FB_TcSourceInfo.nId this station publishes with
+END_VAR
+VAR_OUTPUT
+    bRed    : BOOL;
+    bYellow : BOOL;
+    bGreen  : BOOL;
+    nActiveAlarms   : UDINT;                // diagnostics
+    nActiveWarnings : UDINT;
+    bMessageActive  : BOOL;
+END_VAR
+VAR
+    bFirstCycle  : BOOL := TRUE;
+    nLastMsgSeq  : UDINT;                   // last message sequence handled
+    stMsg        : ST_EventListEntry;
+    fbMsgTimer   : TON;
+    fbBlinkTimer : TON;
+    bBlink       : BOOL;
+END_VAR
+VAR CONSTANT
+    tBlinkHalfPeriod : TIME := T#500MS;     // flash clock (1 Hz)
+    tMsgFlashTime    : TIME := T#3S;        // how long GREEN flashes after a message
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF ipAlarmList = 0 THEN                     // no list connected -> everything off
+    nActiveAlarms := 0; nActiveWarnings := 0; bMessageActive := FALSE;
+    bRed := FALSE; bYellow := FALSE; bGreen := FALSE;
+    RETURN;
+END_IF
+
+// --- alarms: just count rows of "my" source in the shared list ---
+nActiveAlarms   := ipAlarmList.CountBySource(nSourceId, TcEventSeverity.Error,   TcEventSeverity.Critical);
+nActiveWarnings := ipAlarmList.CountBySource(nSourceId, TcEventSeverity.Verbose, TcEventSeverity.Warning);
+
+// --- messages: walk the ones that arrived since last cycle, react to "mine" ---
+IF bFirstCycle THEN
+    bFirstCycle := FALSE;
+    nLastMsgSeq := ipAlarmList.nMessageSequence;
+END_IF
+IF ipAlarmList.nMessageSequence - nLastMsgSeq > ipAlarmList.nMaxRecentMessages THEN
+    nLastMsgSeq := ipAlarmList.nMessageSequence - ipAlarmList.nMaxRecentMessages;  // ring buffer overrun
+END_IF
+WHILE nLastMsgSeq < ipAlarmList.nMessageSequence DO
+    nLastMsgSeq := nLastMsgSeq + 1;
+    IF ipAlarmList.GetMessage(nLastMsgSeq, stMsg) AND stMsg.nSourceId = nSourceId THEN
+        bMessageActive := TRUE;
+        fbMsgTimer(IN := FALSE);            // retrigger pulse
+    END_IF
+END_WHILE
+fbMsgTimer(IN := bMessageActive, PT := tMsgFlashTime);
+IF fbMsgTimer.Q THEN
+    bMessageActive := FALSE;
+END_IF
+
+// --- flash clock ---
+fbBlinkTimer(IN := NOT fbBlinkTimer.Q, PT := tBlinkHalfPeriod);
+IF fbBlinkTimer.Q THEN
+    bBlink := NOT bBlink;
+END_IF
+
+// --- decoder ring ---
+bRed    := (nActiveAlarms   > 0) AND bBlink;
+bYellow := (nActiveWarnings > 0) AND bBlink;
+bGreen  :=  bMessageActive       AND bBlink;
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

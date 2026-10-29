@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <Itf Name="I_ActiveAlarmList" Id="{ca7179c9-4737-4722-b1e6-93691e282cb2}">
+    <Declaration><![CDATA[// Read-only view of an "active alarm list" + recent-message ring buffer.
+//
+// Consumers (stack lights, HMI summaries, interlocks, ...) depend on THIS, not on the
+// FB that produces the list. FB_ActiveAlarmListener implements it from EventLogger
+// callbacks; any other producer (e.g. a list built from the PLC's own FB_TcAlarm.bRaised
+// states, or one fed by the .NET proxy over ADS) can implement it too and the consumers
+// do not change.
+//
+// Alarm identity = event class + event id + source id.
+// Rows are addressed 1..nMaxAlarms; GetAlarm is FALSE for an empty row.
+// Messages are addressed by running sequence number 1..nMessageSequence; GetMessage is
+// FALSE once a message has been overwritten in the ring buffer (size nMaxRecentMessages).
+INTERFACE I_ActiveAlarmList EXTENDS __SYSTEM.IQueryInterface
+]]></Declaration>
+    <Method Name="Count" Id="{f6332275-e0a5-42cb-a0fe-1598de274943}">
+      <Declaration><![CDATA[// Number of raised alarms (any source) whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD Count : UDINT
+VAR_INPUT
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Method Name="CountBySource" Id="{26f58973-c7db-4582-8312-4bc6c0cc6463}">
+      <Declaration><![CDATA[// Number of raised alarms from source nSourceId (= FB_TcSourceInfo.nId the publisher used)
+// whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD CountBySource : UDINT
+VAR_INPUT
+    nSourceId    : UDINT;
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Method Name="CountByEventClass" Id="{a349e1fb-0d90-4ec4-97ca-402d9c25ff17}">
+      <Declaration><![CDATA[// Number of raised alarms of one event class whose severity is within [eMinSeverity .. eMaxSeverity].
+METHOD CountByEventClass : UDINT
+VAR_INPUT
+    eventClass   : GUID;
+    eMinSeverity : TcEventSeverity;
+    eMaxSeverity : TcEventSeverity;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Method Name="IsActive" Id="{d833ace8-7d9a-4fb7-8600-2175a9350e90}">
+      <Declaration><![CDATA[// TRUE if the alarm (event class + event id + source id) is currently raised.
+METHOD IsActive : BOOL
+VAR_INPUT
+    eventClass : GUID;
+    nEventId   : UDINT;
+    nSourceId  : UDINT;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Method Name="GetAlarm" Id="{6627634c-5a9d-4bf3-81fd-685a0a6d47f2}">
+      <Declaration><![CDATA[// Copies row nIndex (1..nMaxAlarms) of the active alarm table. FALSE if the row is empty
+// or nIndex is out of range. Iterate 1..nMaxAlarms to enumerate all raised alarms.
+METHOD GetAlarm : BOOL
+VAR_INPUT
+    nIndex : UDINT;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Method Name="GetMessage" Id="{3e788b3e-13c8-414a-a2ca-6f31626e61a9}">
+      <Declaration><![CDATA[// Fetches the message with running number nSequence from the ring buffer.
+// Returns FALSE if that message was never received or has already been overwritten.
+// Typical use: remember nMessageSequence, then loop over the newer ones each cycle.
+METHOD GetMessage : BOOL
+VAR_INPUT
+    nSequence : UDINT;
+END_VAR
+VAR_IN_OUT
+    stEntry : ST_EventListEntry;
+END_VAR
+]]></Declaration>
+    </Method>
+    <Property Name="nActiveAlarms" Id="{f7c7875b-4d62-4c6e-b341-2d6ae74bbeee}">
+      <Declaration><![CDATA[// Number of alarms currently raised (rows in use).
+PROPERTY nActiveAlarms : UDINT]]></Declaration>
+      <Get Name="Get" Id="{880a3b76-01d4-417b-994c-68d751165f71}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+      </Get>
+    </Property>
+    <Property Name="nMaxAlarms" Id="{29daf506-ef2c-44d0-b26c-6ce3ee775a2c}">
+      <Declaration><![CDATA[// Highest valid row index for GetAlarm.
+PROPERTY nMaxAlarms : UDINT]]></Declaration>
+      <Get Name="Get" Id="{78e81b26-aab6-44ec-afc2-f7840792c394}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+      </Get>
+    </Property>
+    <Property Name="nAlarmChangeCounter" Id="{0a26caea-9fdf-4a81-9f2d-4a2220186994}">
+      <Declaration><![CDATA[// Increments on every raise / clear / dispose. Compare to the last value seen to detect "list changed".
+PROPERTY nAlarmChangeCounter : UDINT]]></Declaration>
+      <Get Name="Get" Id="{ca724e5d-6428-4634-a631-ecab0106dced}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+      </Get>
+    </Property>
+    <Property Name="nMessageSequence" Id="{08609066-6789-4f89-a852-2d0d81e6e038}">
+      <Declaration><![CDATA[// Running number of the newest message received (0 = none yet).
+PROPERTY nMessageSequence : UDINT]]></Declaration>
+      <Get Name="Get" Id="{704dd77a-293f-407d-984f-c0852c01fd4c}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+      </Get>
+    </Property>
+    <Property Name="nMaxRecentMessages" Id="{95381c28-91a5-4f0f-9c6f-8af510059e87}">
+      <Declaration><![CDATA[// Ring buffer size: messages older than nMessageSequence - nMaxRecentMessages are gone.
+PROPERTY nMaxRecentMessages : UDINT]]></Declaration>
+      <Get Name="Get" Id="{3581d850-e67c-4216-a9d8-0feba6012ad9}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+      </Get>
+    </Property>
+  </Itf>
+</TcPlcObject>

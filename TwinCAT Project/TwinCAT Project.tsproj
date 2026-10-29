@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<TcSmProject xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.beckhoff.com/schemas/2012/07/TcSmProject" TcSmVersion="1.0" TcVersion="3.1.4026.27">
+	<Project ProjectGUID="{808BC3D4-2DB9-4F99-8870-06765B9BC6E1}" TargetNetId="199.4.42.250.1.1" Target64Bit="true" ShowHideConfigurations="#x6">
+		<System>
+			<Tasks>
+				<Task Id="3" Priority="20" CycleTime="100000" AmsPort="350" AdtTasks="true">
+					<Name>PlcTask</Name>
+				</Task>
+			</Tasks>
+			<TypeSystem>
+				<AdditionalTmcFile Name="MyEvents" File="MyEvents.tmc"/>
+			</TypeSystem>
+		</System>
+		<Plc>
+			<Project File="PLC.xti"/>
+		</Plc>
+	</Project>
+</TcSmProject>

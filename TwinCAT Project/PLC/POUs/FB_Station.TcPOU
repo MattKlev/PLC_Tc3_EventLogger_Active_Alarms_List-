@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_Station" Id="{c7953e60-8a2d-40db-a5f8-506812320084}" SpecialFunc="None">
+    <Declaration><![CDATA[// Reusable per-station event publisher.
+// All events of a station share one FB_TcSourceInfo whose nId = station number and
+// sName = 'Station n'. The listener uses nId to route the event to the right stack light.
+//
+// Event class TC_EVENTS.StationEvents (MyEvents.tmc), alarm index -> event:
+//   message        CycleComplete   Info      'Cycle complete'
+//   aAlarms[1]     MaintenanceDue  Warning   'Maintenance due'
+//   aAlarms[2]     PartJam         Error     'Part jam'
+//   aAlarms[3]     Overtemperature Critical  'Overtemperature'
+//   aAlarms[4]     LowMaterial     Warning   'Low material'
+//   aAlarms[5]     DoorOpen        Warning   'Door open'
+//   aAlarms[6]     MotorFault      Error     'Motor fault'
+//   aAlarms[7]     SensorFault     Error     'Sensor fault'
+//   aAlarms[8]     EmergencyStop   Critical  'Emergency stop'
+// Several alarms share a severity on purpose: the stack light must stay on until the
+// LAST raised alarm of that severity is cleared.
+FUNCTION_BLOCK FB_Station
+VAR_INPUT
+    nStationId : UDINT;     // 1..GVL_Params.cStations - set before the first call
+END_VAR
+VAR_OUTPUT
+    bInitialized : BOOL;
+    hrLastError  : HRESULT;                                        // last failed call (latched)
+    aRaised      : ARRAY[1..GVL_Params.cStationAlarms] OF BOOL;    // live state of this station's own alarms
+    nRaised      : UDINT;                                          // how many of them are raised
+END_VAR
+VAR
+    fbSource   : FB_TcSourceInfo;
+    fbMessage  : FB_TcMessage;
+    aAlarms    : ARRAY[1..GVL_Params.cStationAlarms] OF FB_TcAlarm;
+    aAlarmDefs : ARRAY[1..GVL_Params.cStationAlarms] OF TcEventEntry;
+    hr         : HRESULT;
+    i          : UDINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF NOT bInitialized AND nStationId > 0 THEN
+    bInitialized := TRUE;
+
+    // source info = station identity (captured by the events at Create time)
+    fbSource.Clear();
+    fbSource.nId   := nStationId;
+    fbSource.sName := CONCAT('Station ', UDINT_TO_STRING(nStationId));
+
+    aAlarmDefs[1] := TC_EVENTS.StationEvents.MaintenanceDue;
+    aAlarmDefs[2] := TC_EVENTS.StationEvents.PartJam;
+    aAlarmDefs[3] := TC_EVENTS.StationEvents.Overtemperature;
+    aAlarmDefs[4] := TC_EVENTS.StationEvents.LowMaterial;
+    aAlarmDefs[5] := TC_EVENTS.StationEvents.DoorOpen;
+    aAlarmDefs[6] := TC_EVENTS.StationEvents.MotorFault;
+    aAlarmDefs[7] := TC_EVENTS.StationEvents.SensorFault;
+    aAlarmDefs[8] := TC_EVENTS.StationEvents.EmergencyStop;
+
+    hr := fbMessage.CreateEx(TC_EVENTS.StationEvents.CycleComplete, fbSource);
+    IF FAILED(hr) THEN hrLastError := hr; END_IF
+    FOR i := 1 TO GVL_Params.cStationAlarms DO
+        hr := aAlarms[i].CreateEx(aAlarmDefs[i], FALSE, fbSource);
+        IF FAILED(hr) THEN hrLastError := hr; END_IF
+    END_FOR
+END_IF
+
+nRaised := 0;
+FOR i := 1 TO GVL_Params.cStationAlarms DO
+    aRaised[i] := aAlarms[i].bRaised;
+    IF aRaised[i] THEN nRaised := nRaised + 1; END_IF
+END_FOR
+]]></ST>
+    </Implementation>
+    <Method Name="SendMessage" Id="{44415dfc-cbf9-4a23-a777-bf0d8eb52a5d}">
+      <Declaration><![CDATA[METHOD SendMessage : HRESULT
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SendMessage := fbMessage.Send(0);
+IF FAILED(SendMessage) THEN hrLastError := SendMessage; END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Raise" Id="{e82e6743-068c-45d2-9df4-a71326d52a62}">
+      <Declaration><![CDATA[// Raises alarm nAlarm (1..GVL_Params.cStationAlarms, see table in the FB header).
+METHOD Raise : HRESULT
+VAR_INPUT
+    nAlarm : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nAlarm < 1 OR nAlarm > GVL_Params.cStationAlarms THEN
+    Raise := DWORD_TO_DINT(16#80070057);  // E_INVALIDARG
+ELSE
+    Raise := aAlarms[nAlarm].Raise(0);
+END_IF
+IF FAILED(Raise) THEN hrLastError := Raise; END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Clear" Id="{0a58b771-827a-4204-b4be-f38ab5a7488b}">
+      <Declaration><![CDATA[// Clears alarm nAlarm (1..GVL_Params.cStationAlarms).
+METHOD Clear : HRESULT
+VAR_INPUT
+    nAlarm : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nAlarm < 1 OR nAlarm > GVL_Params.cStationAlarms THEN
+    Clear := DWORD_TO_DINT(16#80070057);  // E_INVALIDARG
+ELSE
+    Clear := aAlarms[nAlarm].Clear(0, FALSE);
+END_IF
+IF FAILED(Clear) THEN hrLastError := Clear; END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ClearAll" Id="{a23fde61-74f3-421c-b1d6-de200402dc3f}">
+      <Declaration><![CDATA[// Clears every raised alarm of this station (test helper).
+METHOD ClearAll
+VAR
+    n : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR n := 1 TO GVL_Params.cStationAlarms DO
+    IF aAlarms[n].bRaised THEN
+        aAlarms[n].Clear(0, FALSE);
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
